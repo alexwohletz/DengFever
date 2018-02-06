@@ -1,0 +1,663 @@
+---
+ytitle: "DengFinal"
+author: "Alex Wohletz"
+date: "April 21, 2017"
+output: html_document
+bibliography: library.bib
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+#Problem Statement
+
+Dengue fever is a viral infection that results in a serious, sometimes life threatening illness.  It has no current vaccine and no current treatment regimen other than supportive care such as administration of fluids, pain and fever control.  According to the World Health Organization (WHO), instances of dengue fever have increased over 30 times over a period of the last half century.  The number of infected per year is in the upper 50 to 100 million individuals world wide [@Descloux2012]. It affects all population groups with an equal intensity but it is especially prevelant in poor urban areas with ineffective mosquito control policies. It is transmitted to human hosts by the Aedes aegypti (Asian tiger) mosquito. A human may develop an immunity to one serotype of the virus but still lack an effective immune response to the other three serotypes: DEN-1, DEN-2,DEN-3, etc. Unfortunately, subsequent infections have been shown to be more severe and life threatening. ("What is dengue?")[(WHO)](http://www.who.int/denguecontrol/disease/en/).  
+
+Due to the pandemic nature of this virus and its severity, being able to forecast outbreaks down to the number of cases is an essential tool in the fight against this virus by allowing health officials allocate the resources necessary to affected areas.  To that end, this project focuses on Dengue fever forecasting for the two cities Iquitos and San Juan using the combined environmental and case data for provided for both regions by [DrivenData](https://www.drivendata.org/competitions/44/dengai-predicting-disease-spread/page/80/).  
+
+The challenge with forecasting in this particular scenario is in producing a reliable forecast within a time horizon that allows an appropriate response to be operationalized.  To augment our forecasts, we have been provided the daily precipitation, vegetation, humidity, and temperature data corresponding to the number of cases at the same time.  While it will be shown in later EDA that the correlations between the predictors and the number of cases are fairly weak, it is important to reducing forecast error that we use these external regressors in our models.  Research on epidemic prediction shows that temperature "influences the lengths of the mosquito gonotrophic cycle and the extrinsic incubation period of the virus within the mosquito, the survival rate of adults, the mosquitoes population size and feeding behaviours and the speed of virus replicationin shortening the time period between infections"[@Descloux2012] In addition to challenges faced in warm tropical regions, more previously untouched areas are at risk for virus transmission as the range of the Asian tiger mosquito increases with global increases in temperatures[FocksDA1998]. 
+
+Some factors not included explicitly with the data provided, but that have been shown to be predictive of dengue outbreaks are
+"...human population growth, accelerated urbanization, increased international transport, weakened public health infrastructure as well as a lack of effective vector control and disease surveillance"[@Descloux2012].  Possible further investigation into feature engineering or model tuning based off of these influential variables could be considered. 
+
+
+#### Libraries
+
+This problem will require many different tools available to R.  Noteably, the forecast package will provide most of the utility necessary to this problem.
+```{r libraries, include=FALSE, message = FALSE, echo = FALSE}
+require(VIM)
+require(forecast)
+require(dygraphs)
+require(Amelia)
+require(ggvis)
+require(knitr)
+require(magrittr)
+require(dplyr)
+require(xts)
+
+```
+
+####Load and Examine the Structure of the Data
+
+The data comes in a csv format. The labels are seperated from the training data and located in dengue_labels_train. Iquitos and San Juan are combined in the initial data structure and therefore must be split to ensure correct modeling and imputation. Iquitos has a training set of 520 observations across 24 variables not inlcuding the total cases.  The Iquitos test set is 156 observations or 30 percent of the data.  San Juan has more observations with a training size of 936 with the same number of variables.  The San Juan test set is 260 observations or about 27 percent of the data.  Included in the variables are a time index, measures of vegetation, temperature, humidity, and precipitation.
+
+```{r pressure, echo=TRUE}
+#Training data, needed to reformat the string dtype into date.
+dengue_features_train <-
+  read.csv(
+  "C:/Users/Alex/OneDrive/PredictiveAnalytics/Final/dengue_features_train.csv"
+  )
+  
+#Training labels
+dengue_labels_train <-
+  read.csv(
+  "C:/Users/Alex/OneDrive/PredictiveAnalytics/Final/dengue_labels_train.csv"
+  )
+#Test data
+dengue_features_test <- read.csv("C:/Users/Alex/OneDrive/PredictiveAnalytics/Final/dengue_features_test.csv")
+
+str(dengue_features_train)
+str(dengue_labels_train)
+str(dengue_features_test)
+```
+
+####San Juan and Iquitos
+What we see from the statistics below is that even though there are half the observations for Iquitos, there are 8 times as many cases in San Juan.  The population of Iquitos is larger at approximately 437,000 while San Juan clocks in at 389,000. The overall population growth for San Juan post year 2000 has been in decline in contrast to Iquitos which has been steadily growing since the 80's [populationy.city](http://population.city/peru/iquitos/).  Examining a physical map of the two locations using [Google Maps](maps.google.com), we see that Iquitos is surrounded by several different water features including lakes and various rivers, one of which is the Amazon. San Juan, by contrast is a purely costal city surrounded by ocean. As the location of the city is important in determining its average climate, we note that Iquitos is 3.7 degrees south of the equator while San Juan is 18.46 degrees north. 
+```{r two_cities, echo=TRUE}
+#Lets look at the total number of observations for both:
+table(dengue_features_train[,1])
+
+#Okay, so we have a lot more data points for sj. Lets take a look at the number of cases per city.
+dengue_labels_train %>% group_by(city) %>% summarise_each(funs(sum))
+
+#Test split
+sj_test <- dengue_features_test %>% filter(dengue_features_test$city == 'sj')
+sj_test$total_cases <- NA
+iq_test <- dengue_features_test %>% filter(city == 'iq')
+iq_test$total_cases <- NA
+#Split the cities apart into separate training sets
+#San Juan
+sj_train <- dengue_features_train %>% filter(city == 'sj')
+sj_train_labels <- dengue_labels_train %>% filter(city == 'sj')
+sj_time_index <- sj_train$week_start_date
+sj_train$total_cases <- sj_train_labels$total_cases
+sj_total <- rbind.data.frame(sj_test,sj_train)
+
+summary(sj_total)
+#Inquintos
+iq_train <- dengue_features_train %>% filter(city == 'iq')
+iq_train_labels <- dengue_labels_train %>% filter(city == 'iq')
+iq_train$total_cases <- iq_train_labels$total_cases
+iq_time_index <- iq_train$week_start_date
+iq_total <- rbind.data.frame(iq_test,iq_train)
+summary(iq_total)
+
+rm(dengue_features_test)
+rm(dengue_features_test)
+rm(dengue_labels_train)
+```
+
+###Missing values and data cleaning
+
+Just from doing a quick summary of the data, we can see that there are multiple missing values across all of the variables except for the cases.  Using the pMiss function found here: [RBloggers](https://www.r-bloggers.com/imputing-missing-data-with-r-mice-package/), we can easily check and see if the percentage of missing values exceeds n% per variable.  The NDVI_NE variable is missing a significant number of values. Does this mean that there was no vegetation in the area or adequate sampling was obstructed from the clouds?  According to the [wikipedia](https://en.wikipedia.org/wiki/Normalized_Difference_Vegetation_Index) article on NDVI, this measurement should be used with a high degree of caution due to the measurement uncertainty introduced by climate conditions.  Here is where it gets tricky: both cities are different locations in the globe so we almost certainly shouldn't impute all the data at once.  Even though NVDI is missing quite a few values for San Juan, we're missing much less for Iquitos so unfortunately we'll be losing good data dropping the variable from Iquitos; however, in order to keep the width of the dataset consistent perhaps the best strategy is to drop the variable altogether.  In this case, we decided to use mutliple imputation and keep the variable to observe the performance.
+```{r missing_values, echo=FALSE, include = TRUE}
+#Get the sum of the NA observations and convert into a percentage
+pMiss <- function(x){sum(is.na(x))/length(x)*100}
+
+#Apply to the training data.
+apply(sj_total, 2, pMiss)
+apply(iq_total, 2, pMiss)
+
+
+#Okay so we have different percentages of missing data between the two datasets
+missmap(sj_train)
+missmap(iq_train)
+
+#Use Mice for some imputation and plot the results
+imp <- function(x,labels){
+  require(mice)
+  require(Amelia)
+  tempData <- mice(x,meth = 'rf',ntree = 50,printFlag = FALSE)
+  completed <- mice::complete(tempData,1)
+  
+  if(sum(is.na(completed))==0){
+    all <- cbind.data.frame(labels,completed)
+    return(all)
+  }else{
+    warning("Not all cases handled, using median imputation for rest")
+    for(i in seq_along(completed)){   completed[is.na(completed[,i]), i] <- median(completed[,i], na.rm = TRUE) }
+    all <- cbind.data.frame(total_cases = labels,completed)
+    missmap(all)
+    return(all)
+  }
+}
+
+sj_total_complete <- imp(sj_total[6:24],sj_total$total_cases)
+iq_total_complete <- imp(iq_total[6:24],iq_total$total_cases)
+
+#Split back into train and test
+iq_train <- iq_total_complete[which(!is.na(iq_total_complete$total_cases)),]
+sj_train <- sj_total_complete[which(!is.na(sj_total_complete$total_cases)),]
+
+sj_test <- sj_total_complete[which(is.na(sj_total_complete$total_cases)),]
+sj_test <- sj_test[-1]
+iq_test <- iq_total_complete[which(is.na(iq_total_complete$total_cases)),]
+iq_test <- iq_test[-1]
+
+```
+#Exploratory Data Analysis 
+
+In this section I'm looking at the normality of the predictor variables as well as the distribution of the cases to identify any other concerns.  As far as the distribution of the cases go, it is mostly clustered around very small values with a long right tail.  Interestingly, the distribution of the predictor variables such as temperature or the NDVI coefficient are quite normal and correlatted.  One of the things we can look for in our predictors is the possibility of feature engineering.  Information taken from [Mosquito World](http://www.mosquitoworld.net/about-mosquitoes/species/) on the species of mosquito that carries denngue reveals that this mosquito is such an effective vector for disease because, although it is homophilic and prefers human hosts 90% of the time[@FocksDA1998], it will substitute birds and small mammals when human blood meals are unavailable. As mentioned earlier, the Asian tiger, being a floodwater mosquito, is influenced only partially by the precipitation rates in the areas in which it inhabits.  Additionally, it has been shown that the overall virus life cycle is heavily influenced by temperature.  The optimal temperature for outbreak conditions being at 38 degrees C. Temperatures above this cause a rapid decay in the probability of an epidemic[@FocksDA1998].  Temperatures below 24C slow the mosquito breeding rates and any area which reaches freezing temperatures tends to be protected from the spread of the Asian tiger algother although there are exceptions[@FocksDA1998]. 
+```{r eda}
+#Examine the distribution of cases
+hist(iq_train_labels$total_cases, main ='Distribution of Dengue cases in Iquitos')
+summary(sj_train_labels$total_cases)
+hist(sj_train_labels$total_cases, main = 'Distribution of Dengue cases in San Juan')
+summary(iq_train_labels$total_cases)
+
+##RESOURCE SELECTION
+##It makes sense that vegetation is correlated across the quadrants.
+library(ResourceSelection)
+kdepairs(sj_train[1:10])
+kdepairs(iq_train[1:10])
+
+
+#Look at a corrplot of the features
+library(corrplot)
+sj_train %>% cor(use = 'pairwise.complete.obs') %>% corrplot(., type="lower", method="circle",diag=FALSE)
+iq_train %>% cor(use = 'pairwise.complete.obs') %>% corrplot(., type="lower", method="circle",diag=FALSE)
+
+```
+
+###Examining time series
+
+Up until now we've ignored the fact that this is time series data.  There are many ways to do transform the data into a time indexed object in R, but the method we chose was to create a time series (ts) object using the start date for each city respectively.  It was important to isolate only the cases/labels in this processes or the ts does not work properly. Plotting the time series against the number of cases reveals that the data is fairly seasonal with the highest number of cases occuring around Decemeber-January for both locations.  Looking at the ACF and PACF reveals some interesting information about the autocorrelations present in the data. Our auto.arima model will probably need to difference the data at least once to acheive a more stationary time series.  Decomposing the time series further reveals the seasonal and trend components underlying the time series, it also shows the random component of the data.  More importantly, the trend line for each of the cities shows the long term shock a level shift introduces on the model. This might affect the forecast performance because according to Smith, "Sudden level shifts can dramatically affect the forecasting performance of a time series model. Models that assume a constant level produce biased forecasts after a level shift. Such bias often dictates the overall performance of forecasting models [@Smith2005]."
+
+Finally, because sources state that it is useful to look at the normality of the errors to acertain the validity of the model, we built an error plotting function and pushed the residuals from a simple auto.arima model through the function. The code for the function was found [here](http://a-little-book-of-r-for-time-series.readthedocs.io/en/latest/src/timeseries.html). We can see that at least for modeling the San Juan train data, the error appears normally distributed.
+```{r timeseries}
+
+#Time series
+sj_train_ts<- ts(sj_train$total_cases,frequency = 52, start=c(1990,04,30))
+##Example using 0s sj_train_cases <- ts(sj_train$cases,frequency = 52, start=c(1990,04,30))
+iq_train_ts<- ts(iq_train$total_cases,frequency = 52, start = c(2000,07,01))
+
+#XTS allows us to use more granular plots and dygraph tools.
+sj_xts <- xts(sj_train,order.by = as.Date(sj_time_index[1:936]))
+iq_xts <- xts(iq_train,order.by = as.Date(iq_time_index[1:520]))
+
+
+#Do some prelimary plotting of the time series
+dygraph(sj_xts[,c(1,16,20)], main = 'San Juan cases versus temp and precip') %>% dyRangeSelector()
+dygraph(iq_xts[,c(1,16,20)], main = 'Iquitos cases versus temp and precip') %>% dyRangeSelector()
+tsdisplay(diff(sj_train_ts))
+tsdisplay(diff(iq_train_ts))
+
+#Take a look at the decomposed time series
+plot(decompose(sj_train_ts))
+plot(decompose(iq_train_ts))
+
+#Create a plotting function to view the distribution of forecast errors
+plotForecastErrors <- function(forecasterrors)
+  {
+     # make a histogram of the forecast errors:
+     mybinsize <- IQR(forecasterrors)/4
+     mysd   <- sd(forecasterrors)
+     mymin  <- min(forecasterrors) - mysd*5
+     mymax  <- max(forecasterrors) + mysd*3
+     # generate normally distributed data with mean 0 and standard deviation mysd
+     mynorm <- rnorm(10000, mean=0, sd=mysd)
+     mymin2 <- min(mynorm)
+     mymax2 <- max(mynorm)
+     if (mymin2 < mymin) { mymin <- mymin2 }
+     if (mymax2 > mymax) { mymax <- mymax2 }
+     # make a red histogram of the forecast errors, with the normally distributed data overlaid:
+     mybins <- seq(mymin, mymax, mybinsize)
+     hist(forecasterrors, col="red", freq=FALSE, breaks=mybins)
+     # freq=FALSE ensures the area under the histogram = 1
+     # generate normally distributed data with mean 0 and standard deviation mysd
+     myhist <- hist(mynorm, plot=FALSE, breaks=mybins)
+     # plot the normal curve as a blue line on top of the histogram of forecast errors:
+     points(myhist$mids, myhist$density, type="l", col="blue", lwd=2)
+  }
+
+#Build a quick 1-off model to look at the residuals.
+test_model <-auto.arima(sj_train_ts)
+Box.test(test_model$residuals, lag = 20, type = 'Ljung-Box')
+plotForecastErrors(test_model$residuals)
+
+#This is probably going overboard, but I have read that when it rains too much, it actually washes away mosquitos, so I binned the precipitation amount just to get an intution of how much rain sj gets.  
+table(cut(sj_train$precipitation_amt_mm, c(-Inf,35,200,300,Inf),labels = c("dry","average", 'high','drowning')))
+
+```
+#Modeling 
+
+The first attempt at modeling using a neural net forecast yielded a submission score of 35.00 for the competition.  That wasn't great, so next I tried a baseline ARIMA model using only the time series without any external regressors.  Obviously, this performed even worse than my neural net model.  I then tried an auto.arima to see if a simpler model would yield better results.  Interestingly, before removing the outliers, this yielded quite a few negative values in the forecast which was a problem since it is impossible to have negative cases of dengue fever.  I noticed that these values were very different from my neural network forecast, so I decided that perhaps an ensemble model would work better than either.  I created two models for each city and then averaged their forecasts using a simple mean.  The result was the best submission so far of 26+. After some research on how to remove level shifts and reduce bias in a time series a system, I used the tsclean function from the forecast package to remove outliers that caused undue shocks to the time series.  This allowed the forecasts to avoid the trap of overpredicting based off cases that weren't typical of the data.  Next I noticed that the ARIMA model worked well for Iquitos but it produced a fairly unimpressive result for San Juan; therefore, I used the ARIMA model for Iquitos and the neural net for San Juan without any averaging.  This produced a submission result of 25.7500.
+
+```{r modeling, eval=FALSE, include=TRUE}
+sj_clean_ts <- tsclean(sj_train_ts)
+iq_clean_ts <- tsclean(iq_train_ts)
+
+#Neural net
+fit_sj_nnet <- nnetar(sj_clean_ts, size = 10,repeats = 50, decay = .01, p = 1, xreg=sj_train[-1])
+fit_iq <-nnetar(iq_clean_ts,size = 10, repeats = 50, p = 1, decay = .01, xreg = iq_train[-1])
+#Auto Arima
+fit_iq_arima <- auto.arima(iq_clean_ts, allowdrift = TRUE, xreg = iq_train[-1])
+fit_sj_arima <- auto.arima(sj_clean_ts, allowdrift = TRUE, xreg = sj_train[-1])
+#SES just for fun
+#fit_ses_sj <- ses(sj_train_ts,initial = 'optimal', h =260)
+#fit_ses_iq <- ses(iq_train_ts,initial = 'optimal', nrow(iq_test))
+
+#Build multiple predictions
+sj_arima_forecast <- forecast(fit_sj_arima, h = 260, xreg = sj_test)
+sj_forecast_nnet <- forecast.nnetar(fit_sj_nnet, bootstrap = TRUE,h = 260, xreg = sj_test, PI =TRUE)
+#Test with seasonal adjustment
+sj_stl_arima_forecast <- stlf(sj_train_ts, method = 'arima', xreg = sj_train$reanalysis_avg_temp_k, newxreg = sj_test$reanalysis_avg_temp_k, h = 260)
+
+iq_forecast <- forecast.nnetar(fit_iq, bootstrap = TRUE, h = nrow(iq_test), xreg = iq_test, PI = TRUE)
+iq_forecast_arima <- forecast(fit_iq_arima, h = nrow(iq_test), xreg = iq_test)
+
+
+plot(fit_iq_arima$x, col = 'red')
+lines(fitted(fit_iq_arima),col = 'blue')
+
+plot(fit_sj_arima$x, col = 'red')
+lines(fitted(fit_sj_arima),col = 'blue')
+
+par(mfrow=c(2,2))
+plot(iq_forecast, main = 'NNETAR forecast of the Iquitos test data')
+plot(iq_forecast_arima, main = 'ARIMA forecast of the Iquitos test data')
+plot(sj_arima_forecast, main = 'ARIMA forecast of the San Juan test data')
+plot(sj_forecast_nnet, main = 'NNETAR forecast of the San Juan test data')
+```
+
+###Predictions
+To build my submissions, I simply save all of the forecasts for both cities to CSV, then I copy the respective values into the submission format file provided.
+```{r predictions, eval=FALSE, include=TRUE}
+
+write.csv(sj_arima_forecast,"sj_arima_forecast.csv")
+write.csv(sj_forecast_nnet,"sj_nnet_forecast_bts.csv")
+write.csv(sj_stl_arima_forecast, 'sj_stl_arima_forecast.csv')
+
+write.csv(iq_forecast,"iq_forecast_nnet_bts.csv")
+write.csv(iq_forecast_arima,"iq_forecast_arima.csv")
+
+
+
+```
+
+###Cleaning, Modeling, and Predicting with Python
+Using Python I was able to create two different types of models. First the data was separated into San Juan and Iquitoes sets and the NA values were interpolated. Several plots were made for exploring the data sets. The first model was a  GLM model using a Negative Binomial family parameter. With this model I was able to score a 25.8173. This is an ok score. Next I did some research and came across LSTM or Long Short Term Memory models. These models are supposed to perform well with time series data.In a traditional recurrent neural network, during the gradient back-propagation phase, the gradient signal can end up being multiplied many times (as many as the number of timesteps) by the weight matrix associated with the connections between the neurons of the recurrent hidden layer. This means that, the magnitude of weights in the transition matrix can have a strong impact on the learning process.[@Graves2008][@Gers2000][@Hochreiter1997] Further reading from a deep learning tutorial: 
+
+>"If the weights in this matrix are small (or, more formally, if the leading eigenvalue of the weight matrix is smaller than 1.0), it can lead to a situation called vanishing gradients where the gradient signal gets so small that learning either becomes very slow or stops working altogether. It can also make more difficult the task of learning long-term dependencies in the data. Conversely, if the weights in this matrix are large (or, again, more formally, if the leading eigenvalue of the weight matrix is larger than 1.0), it can lead to a situation where the gradient signal is so large that it can cause learning to diverge. This is often referred to as exploding gradients.
+These issues are the main motivation behind the LSTM model which introduces a new structure called a memory cell. A memory cell is composed of four main elements: an input gate, a neuron with a self-recurrent connection (a connection to itself), a forget gate and an output gate. The self-recurrent connection has a weight of 1.0 and ensures that, barring any outside interference, the state of a memory cell can remain constant from one timestep to another. The gates serve to modulate the interactions between the memory cell itself and its environment. The input gate can allow incoming signal to alter the state of the memory cell or block it. On the other hand, the output gate can allow the state of the memory cell to influence other neurons or prevent it. Finally, the forget gate can modulate the memory cell's self-recurrent connection, allowing the cell to remember or forget its previous state, as needed."[LTSM Networks](http://deeplearning.net/tutorial/lstm.html)
+
+So far the best score achieve with the LSTM model is 28.1106. With better cleaning and removal of outliers I believe this model could do even better. But do to time constraints this will have to do for now. Below you will find all the code needed to replicate my results.
+
+```{python, eval = FALSE}
+from __future__ import print_function
+from __future__ import division
+import seaborn as sns
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import math
+from keras.utils.np_utils import to_categorical
+from keras.models import Sequential
+from keras.layers import Dense , Dropout
+from keras.layers import LSTM
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.metrics import mean_absolute_error
+from statsmodels.tools import eval_measures
+import statsmodels.formula.api as smf
+import statsmodels.api as sm
+from sklearn.preprocessing import StandardScaler
+from sklearn import preprocessing
+from sklearn.preprocessing import LabelEncoder
+from sklearn.ensemble import RandomForestClassifier
+```
+
+```{python, eval = FALSE}
+# load the provided data
+train_features = pd.read_csv('D:\Predictive Analysis\Final DengAI\dengue_features_train.csv', index_col=[0,1,2])
+
+train_labels = pd.read_csv('D:\Predictive Analysis\Final DengAI\dengue_labels_train.csv', index_col=[0,1,2])
+
+
+# Seperate data for San Juan
+sj_train_features = train_features.loc['sj']
+sj_train_labels = train_labels.loc['sj']
+
+# Separate data for Iquitos
+iq_train_features = train_features.loc['iq']
+iq_train_labels = train_labels.loc['iq']
+
+print('San Juan')
+print('features: ', sj_train_features.shape)
+print('labels  : ', sj_train_labels.shape)
+
+print('\nIquitos')
+print('features: ', iq_train_features.shape)
+print('labels  : ', iq_train_labels.shape)
+
+sj_train_features.head()
+
+
+# Remove `week_start_date` string.
+sj_train_features.drop('week_start_date', axis=1, inplace=True)
+iq_train_features.drop('week_start_date', axis=1, inplace=True)
+
+# Null check
+pd.isnull(sj_train_features).any()
+
+
+(sj_train_features
+     .ndvi_ne
+     .plot
+     .line(lw=0.8))
+
+plt.title('Vegetation Index over Time')
+plt.xlabel('Time')
+```
+
+```{python,eval = FALSE}
+sj_train_features = sj_train_features.interpolate()
+iq_train_features = iq_train_features.interpolate()
+
+print('San Juan')
+print('mean: ', sj_train_labels.mean()[0])
+print('var :', sj_train_labels.var()[0])
+
+print('\nIquitos')
+print('mean: ', iq_train_labels.mean()[0])
+print('var :', iq_train_labels.var()[0])
+
+sj_train_labels.hist()
+iq_train_labels.hist()
+
+```
+
+```{python, eval = FALSE}
+sj_train_features['total_cases'] = sj_train_labels.total_cases
+iq_train_features['total_cases'] = iq_train_labels.total_cases
+
+```
+
+```{python, eval = FALSE}
+# compute the correlations
+sj_correlations = sj_train_features.corr()
+iq_correlations = iq_train_features.corr()
+
+# plot san juan
+sj_corr_heat = sns.heatmap(sj_correlations)
+plt.title('San Juan Variable Correlations')
+
+# plot iquitos
+iq_corr_heat = sns.heatmap(iq_correlations)
+plt.title('Iquitos Variable Correlations')
+```
+
+```{python, eval = FALSE}
+# San Juan
+(sj_correlations
+     .total_cases
+     .drop('total_cases') # don't compare with myself
+     .sort_values(ascending=False)
+     .plot
+     .barh())
+```
+
+```{python, eval = FALSE}
+# Iquitos
+(iq_correlations
+     .total_cases
+     .drop('total_cases') # don't compare with myself
+     .sort_values(ascending=False)
+     .plot
+     .barh())
+```
+
+```{python, eval = FALSE}
+def preprocess_data(data_path, labels_path=None):
+    # load data and set index to city, year, weekofyear
+    df = pd.read_csv(data_path, index_col=[0, 1, 2])
+    
+    # select features we want
+    features = ['reanalysis_specific_humidity_g_per_kg', 
+                 'reanalysis_dew_point_temp_k', 
+                 'station_avg_temp_c', 
+                 'station_min_temp_c']
+    df = df[features]
+
+    # fill missing values
+    df.fillna(method='ffill', inplace=True)
+
+    # add labels to dataframe
+    if labels_path:
+        labels = pd.read_csv(labels_path, index_col=[0, 1, 2])
+        df = df.join(labels)
+    
+    # separate san juan and iquitos
+    sj = df.loc['sj']
+    iq = df.loc['iq']
+    
+    return sj, iq
+```
+
+```{python, eval = FALSE}
+sj_train, iq_train = preprocess_data('D:\Predictive Analysis\Final DengAI\dengue_features_train.csv', labels_path="D:\Predictive Analysis\Final DengAI\dengue_labels_train.csv")
+
+```
+
+```{python, eval = FALSE}
+print(sj_train.describe())
+
+```
+
+```{python, eval = FALSE}
+print(iq_train.describe())
+
+```
+
+```{python,eval = FALSE}
+#make the labels a float
+sj_label = sj_train_labels.values
+sj_label = sj_label.astype('float32')
+
+iq_label = iq_train_labels.values
+iq_label = iq_label.astype('float32')
+```
+
+```{python, eval = FALSE}
+# normalize the SJ dataset
+scaler_sj = MinMaxScaler(feature_range=(0, 1))
+sj_train = scaler_sj.fit_transform(sj_train)
+# normalize the IQ dataset
+scaler_iq = MinMaxScaler(feature_range=(0, 1))
+iq_train = scaler_iq.fit_transform(iq_train)
+```
+
+```{python, eval = FALSE}
+#function to make t and t-1 sets
+def create_dataset(dataset, look_back=1):
+	dataX, dataY = [], []
+	for i in range(len(dataset)-look_back-1):
+		a = dataset[i:(i+look_back), 0]
+		dataX.append(a)
+		dataY.append(dataset[i + look_back, 0])
+	return np.array(dataX), np.array(dataY)
+
+```
+
+```{python, eval = FALSE}
+#create t and t-1 datasets
+look_back = 1
+trainX, trainY = create_dataset(sj_train, look_back)
+testX, testY = create_dataset(sj_label, look_back)
+
+iq_trainXX, iq_trainYY = create_dataset(iq_train, look_back)
+iq_testXX, iq_testYY = create_dataset(iq_label, look_back)
+```
+
+```{python, eval = FALSE}
+# reshape input to be [samples, time steps, features]
+trainX = np.reshape(trainX, (trainX.shape[0],1, trainX.shape[1]))
+trainY = np.reshape(trainY, (trainY.shape[0], 1, 1))
+
+iq_trainXX = np.reshape(iq_trainXX, (iq_trainXX.shape[0], 1, iq_trainXX.shape[1]))
+iq_trainYY = np.reshape(iq_trainYY, (iq_trainYY.shape[0], 1, 1))
+```
+
+```{python, eval = FALSE}
+#LSTM model
+model = Sequential()
+model.add(LSTM(4, input_shape=(1, look_back)))
+model.add(Dense(1))
+model.compile(loss='mean_absolute_error', optimizer='sgd')
+
+sj_model = model.fit(trainY, testX, nb_epoch=100, batch_size=1, verbose=0,validation_split=0.1)
+iq_model = model.fit(iq_trainYY, iq_testXX, nb_epoch=100, batch_size=1, verbose=0,validation_split=0.1)
+```
+
+```{python, eval = FALSE}
+#load test data then scale, transform, and reshape
+sj_test, iq_test = preprocess_data('D:\Predictive Analysis\Final DengAI\dengue_features_test.csv')
+sj_test = scaler_sj.fit_transform(sj_test)
+sj_testX, sj_testY = create_dataset(sj_test, look_back)
+
+sj_testX = np.reshape(sj_testX, (sj_testX.shape[0], 1, sj_testX.shape[1]))
+sj_testY = np.reshape(sj_testY, (sj_testY.shape[0], 1, 1))
+
+```
+
+```{python, eval = FALSE}
+#make predictions for SJ
+sj_predictionsX = sj_model.model.predict(sj_testX)
+sj_predictionsY = sj_model.model.predict(sj_testY)
+```
+
+```{python, eval = FALSE}
+#repeat process for IQ
+iq_test = scaler_iq.fit_transform(iq_test)
+iq_testX, iq_testY = create_dataset(iq_test, look_back)
+
+iq_testX = np.reshape(iq_testX, (iq_testX.shape[0], 1, iq_testX.shape[1]))
+iq_testY = np.reshape(iq_testY, (iq_testY.shape[0], 1, 1))
+
+iq_predictionsX = iq_model.model.predict(iq_testX)
+iq_predictionsY = iq_model.model.predict(iq_testY)
+```
+
+```{python, eval = FALSE}
+#make a submission file
+submissionX = pd.read_csv("D:\Predictive Analysis\Final DengAI\submission_format.csv", index_col=[0, 1, 2])
+submissionY = pd.read_csv("D:\Predictive Analysis\Final DengAI\submission_format.csv", index_col=[0, 1, 2])
+full_predictionsX = np.concatenate([sj_predictionsX, iq_predictionsX])
+full_predictionsY = np.concatenate([sj_predictionsY, iq_predictionsY])
+a = iq_predictionsX.mean()
+b = iq_predictionsY.mean()
+#for some reason the prediction was 4 short so I added the mean to the end to make it the correct length
+full_predictionsX = np.append(full_predictionsX,[a,a,a,a])
+full_predictionsY = np.append(full_predictionsY,[b,b,b,b])
+submissionX.total_cases = full_predictionsX.astype('int')
+submissionY.total_cases = full_predictionsY.astype('int')
+submissionX.to_csv("D:\Predictive Analysis\Final DengAI\LSTM_submissionX.csv")
+submissionY.to_csv("D:\Predictive Analysis\Final DengAI\LSTM_submissionY.csv")
+```
+
+Code taken from the official DengAI benchmark [tutorial](https://shaulab.github.io/DrivenData/DengAI/Benchmark.html).
+```{python, eval = FALSE}
+#steps for the GLM model
+
+sj_train, iq_train = preprocess_data('D:\Predictive Analysis\Final DengAI\dengue_features_train.csv', labels_path="D:\Predictive Analysis\Final DengAI\dengue_labels_train.csv")
+
+sj_train_subtrain = sj_train.head(800)
+sj_train_subtest = sj_train.tail(sj_train.shape[0] - 800)
+
+iq_train_subtrain = iq_train.head(400)
+iq_train_subtest = iq_train.tail(iq_train.shape[0] - 400)
+
+
+#make a model
+def get_best_model(train, test):
+    # Step 1: specify the form of the model
+    model_formula = "total_cases ~ 1 + " \
+                    "reanalysis_specific_humidity_g_per_kg + " \
+                    "reanalysis_dew_point_temp_k + " \
+                    "station_min_temp_c + " \
+                    "station_avg_temp_c"
+    
+    grid = 10 ** np.arange(-8, -3, dtype=np.float64)
+                    
+    best_alpha = []
+    best_score = 1000
+        
+    # Step 2: Find the best hyper parameter, alpha
+    for alpha in grid:
+        model = smf.glm(formula=model_formula,
+                        data=train,
+                        family=sm.families.NegativeBinomial(alpha=alpha))
+
+        results = model.fit()
+        predictions = results.predict(test).astype(int)
+        score = eval_measures.meanabs(predictions, test.total_cases)
+
+        if score < best_score:
+            best_alpha = alpha
+            best_score = score
+
+    print('best alpha = ', best_alpha)
+    print('best score = ', best_score)
+            
+    # Step 3: refit on entire dataset
+    full_dataset = pd.concat([train, test])
+    model = smf.glm(formula=model_formula,
+                    data=full_dataset,
+                    family=sm.families.NegativeBinomial(alpha=best_alpha))
+
+    fitted_model = model.fit()
+    return fitted_model
+    
+sj_best_model = get_best_model(sj_train_subtrain, sj_train_subtest)
+iq_best_model = get_best_model(iq_train_subtrain, iq_train_subtest)
+
+figs, axes = plt.subplots(nrows=2, ncols=1)
+
+# plot sj
+sj_train['fitted'] = sj_best_model.fittedvalues
+sj_train.fitted.plot(ax=axes[0], label="Predictions")
+sj_train.total_cases.plot(ax=axes[0], label="Actual")
+
+# plot iq
+iq_train['fitted'] = iq_best_model.fittedvalues
+iq_train.fitted.plot(ax=axes[1], label="Predictions")
+iq_train.total_cases.plot(ax=axes[1], label="Actual")
+
+plt.suptitle("Dengue Predicted Cases vs. Actual Cases")
+plt.legend()
+
+
+sj_test, iq_test = preprocess_data('D:/Predictive Analysis/Final DengAI/dengue_features_test.csv')
+
+sj_predictions = sj_best_model.predict(sj_test).astype(int)
+iq_predictions = iq_best_model.predict(iq_test).astype(int)
+
+submission = pd.read_csv("D:/Predictive Analysis/Final DengAI/submission_format.csv",
+                         index_col=[0, 1, 2])
+
+submission.total_cases = np.concatenate([sj_predictions, iq_predictions])
+submission.to_csv("D:/Predictive Analysis/Final DengAI/GLM_dengue.csv")
+```
+
+
+#Final Notes and Learning Outcomes
+After trying various feature combinations and even using PCA against the data, the model did not improve even though the forecasts look 'reasonable' when plotted. To improve this model, it may be necessary to exclude the outliers that occur in both San Juan and Iquitos without any support from the environmental data, doing so may improve the overall models for both cities because the forecasts are typically too high.  In addition, the population data for San Juan shows a marked decrease in population in the order of -10% per year starting from 2000.  This means fewer human hosts for the virus and a overall lower infection rate.  To adjust for this population shift, it may be necessary to build a piecewise model of some kind or do further data cleaning.  
+
+This project was a valuable learning exercise in dealing with time series data. A better outcome with the recurrent neural networks or the LSTM network would have been preferable, but proper implementation and tuning of this kind of machine learning tool could probably take up a class all its own.  In general, most of the challenges we encountered with time series were asking the correct question of the model, understanding the output, and formatting the data so it can be used by those models.  
+
+#References
+
+"LSTM Networks for Sentiment Analysis" (n.d.). Retrieved May 08, 2017, from http://deeplearning.net/tutorial/lstm.html
+
+"What is dengue?" (n.d.). Retrieved May 08, 2017, from http://www.who.int/denguecontrol/disease/en/
+
+"Iquitos population" (n.d.) Retrieved May 08, 2017, from http://population.city/peru/iquitos/
